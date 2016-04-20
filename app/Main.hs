@@ -10,14 +10,23 @@ module Main where
 
 import Lib
 
+import Control.Applicative
 
--- import Data.Text hiding (zip)
+import Data.Text (unpack, pack)
 import Foreign.C.Types (CShort, CDouble, CInt)
 
 import Servant.API
 import Servant
 import Servant.CSV.Cassava
 import Network.Wai.Handler.Warp (run)
+import Network.Wai.Middleware.Cors (simpleCors)
+
+import Servant.Swagger
+import Data.Swagger
+import Data.Swagger.ParamSchema
+import Data.Swagger.Lens -- (type_)
+import Control.Lens hiding ((.=))
+import Data.HashMap.Strict ()
 
 import Control.Monad
 import Control.Monad.Trans
@@ -26,6 +35,7 @@ import Control.Monad.IO.Class
 
 import Data.Aeson hiding ((.=))
 import Data.Csv
+import Data.Maybe (fromJust, fromMaybe)
 
 import Data.Time.Clock
 import Data.Time.Format
@@ -55,22 +65,37 @@ firstHour = UTCTime (fromGregorian 1989 12 31) (secondsToDiffTime 0)
 hour :: NominalDiffTime
 hour = 60*60 -- Seconds
 
-type BomAPI
+type AppAPI
+  = "swagger.json" :> Get '[JSON] Swagger
+    :<|> BoMAPI
+
+appProxy :: Proxy AppAPI
+appProxy = Proxy
+
+type BoMAPI
   = "v1" :> BomAPIv1
 
-bomProxy :: Proxy BomAPI
+bomProxy :: Proxy BoMAPI
 bomProxy = Proxy
 
 type BomAPIv1
   = "DNI"
-      :> Capture "lat" Double :> Capture "lat" Double
-      -- :> QueryParam "start" UTCTime :> QueryParam "end" UTCTime
-      :> Get '[(CSV',DefaultEncodeOpts),JSON] [TimeVal]
+      :> Capture "lat" Double :> Capture "lon" Double
+      :> QueryParam "start" ISO8601 :> QueryParam "end" ISO8601
+      :> Get '[(CSV',DefaultEncodeOpts)] [DNIVal]
 
+iso8601Format = iso8601DateFormat $ Just "%H:%M:%S%z"
 newtype ISO8601 = ISO8601 UTCTime
   deriving (Show, Eq, Generic, ToJSON, FromJSON)
 instance ToField ISO8601 where
-  toField (ISO8601 utc) = toField $ formatTime defaultTimeLocale (iso8601DateFormat $ Just "%H:%M:%S%z") utc
+  toField (ISO8601 utc) = toField $ formatTime defaultTimeLocale iso8601Format utc
+instance FromText ISO8601 where
+  fromText t = ISO8601 <$> parseTimeM False defaultTimeLocale iso8601Format (unpack t)
+instance ToParamSchema ISO8601 where
+  toParamSchema _ = mempty
+    & schemaType .~ SwaggerString
+    & schemaFormat .~ Just (pack iso8601Format)
+
 
 newtype PosInt = PosInt Int
   deriving (Eq, Show, Generic, ToJSON, FromJSON)
@@ -79,38 +104,49 @@ instance ToField PosInt where
     then toField ("-" :: String)
     else toField i
 
-data TimeVal = TimeVal
-  {tvTime :: {-# UNPACK #-}!ISO8601
-  , tvVal :: {-# UNPACK #-}!PosInt
+data DNIVal = DNIVal
+  {dniTime :: {-# UNPACK #-}!ISO8601
+  , dniVal :: {-# UNPACK #-}!PosInt
   }
   deriving (Eq,Show,Generic)
 
-instance ToJSON TimeVal
-instance FromJSON TimeVal
-instance DefaultOrdered TimeVal where
+instance ToJSON DNIVal
+instance FromJSON DNIVal
+instance DefaultOrdered DNIVal where
   headerOrder _ = ["UTC time","DNI"]
-instance ToNamedRecord TimeVal where
-  toNamedRecord (TimeVal time val) = namedRecord
+instance ToNamedRecord DNIVal where
+  toNamedRecord (DNIVal time val) = namedRecord
     [ "UTC time" .= time
     , "DNI"  .= val
     ]
-
+instance ToSchema PosInt
+instance ToSchema ISO8601
+instance ToSchema DNIVal
+-- where
+--   declareNamedSchema _ = pure (Just "DNIVal", schema) where
+--     schema = mempty
+--       & schemaType .~ SwaggerObject
+--       & schemaProperties .~
+--           [("dniTime", toSchemaRef (Proxy :: Proxy ISO8601))
+--           ,("dniVal" , toSchemaRef (Proxy :: Proxy PosInt))
+--           ]
+--       & schemaRequired .~ ["dniTime", "dniVal"]
 
 retriveTimeSeries
-  :: Chan (Double,Double, MVar (Either String (Vector CInt)))
+  :: Chan (Double,Double, Maybe ISO8601, Maybe ISO8601, MVar (Either String (Vector CInt)))
   -> Double -> Double --
-  -- -> Maybe UTCTime -> Maybe UTCTime
-  -> EitherT ServantErr IO [TimeVal]
-retriveTimeSeries ch lat lon = do -- _mstart _mend = do
+  -> Maybe ISO8601 -> Maybe ISO8601
+  -> EitherT ServantErr IO [DNIVal]
+retriveTimeSeries ch lat lon mstart mend = do
   evec <- liftIO $ do
     ret <- newEmptyMVar
-    writeChan ch (lat,lon,ret)
+    writeChan ch (lat,lon,mstart,mend,ret)
     race (threadDelay 200000 >> return "Timed out") (takeMVar ret)
   case join evec of
     Left err -> left err500{errReasonPhrase = errReasonPhrase err500 ++ " ("++err++")"}
     Right vec
-      -> pure $ zipWith (coerce TimeVal)
-                    (iterate (addUTCTime hour) firstHour)
+      -> pure $ zipWith (coerce DNIVal)
+                    (iterate (addUTCTime hour) (fromMaybe firstHour (coerce mstart)))
                     (map (fromIntegral :: CInt -> Int) $ SV.toList vec)
 
 
@@ -128,25 +164,39 @@ main = do
           ch <- newChan
 
           -- print =<< (runEitherT $ retriveTimeSeries nc band1 (cdToD lats) (cdToD lons)  (-27) 137 Nothing Nothing)
-          forkIO $ run 8080 $ serve bomProxy (retriveTimeSeries ch)
+          forkIO $ run 8080 $ simpleCors $ serve appProxy (pure (toSwagger bomProxy) :<|> retriveTimeSeries ch)
           vectorServer nc band1 (cdToD lats) (cdToD lons) ch
+
+  where cdToD :: Vector CDouble -> Vector Double
+        cdToD = coerce
 
 
 vectorServer :: NcInfo NcRead -> NcVar -> Vector Double -> Vector Double
-  -> Chan (Double,Double,MVar (Either String (Vector CInt)))
+  -> Chan (Double,Double,Maybe ISO8601, Maybe ISO8601,MVar (Either String (Vector CInt)))
   -> IO ()
 vectorServer nc band1 lats lons ch = forever $ do
-  (lat,lon,ret) <- readChan ch
+  (lat,lon,mstart,mend,ret) <- readChan ch
   let lati = vectorIndex LT FromStart lats lat
       loni = vectorIndex LT FromStart lons lon
-  evec <- getA nc band1 [lati,loni,0] [1,1,nhours]
-  putMVar ret $ case evec of
-    Left err -> Left (show err)
-    Right vec -> Right vec
-
-
-cdToD :: Vector CDouble -> Vector Double
-cdToD = coerce
+      sidx = maybe 0      (max 0)      (getOffset mstart)
+      eidx = maybe nhours (min nhours) (getOffset mend  )
+  if eidx < sidx
+    then putMVar ret (Left $ unwords ["End time before start time, start:",show mstart,"end:",show mend])
+    else do
+      evec <- getA nc band1 [lati,loni,sidx] [1,1,eidx-sidx]
+      putMVar ret $ case evec of
+        Left err -> Left (show err)
+        Right vec -> Right vec
+  where
+    getOffset :: Maybe ISO8601 -> Maybe Int
+    getOffset (Just (ISO8601 utc))
+      | dif < 0 = Nothing
+      | dif <= fromIntegral nhours * hour
+        = case properFraction dif of
+          (secs,_) -> case secs `div` (60*60) of
+            hours -> Just (fromInteger hours)
+      where dif = diffUTCTime utc firstHour
+    getOffset _ = Nothing
 
 
 data IndexStart = FromStart | FromEnd
