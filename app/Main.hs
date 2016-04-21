@@ -74,9 +74,13 @@ import Control.Concurrent.MVar
 import           Configuration.Utils
 import           PkgInfo_bom_solar_webservice
 
+--
+-- Configuration types
+--
 data BoMSolarConf = BoMSolarConf
   {_bsHttpPort :: Int
   ,_bsAccessLog :: FilePath
+  ,_bsNetCDF :: FilePath
   }
 $(makeLenses ''BoMSolarConf)
 
@@ -84,23 +88,27 @@ defaultBoMSolarConf :: BoMSolarConf
 defaultBoMSolarConf = BoMSolarConf
   {_bsHttpPort = 3003
   ,_bsAccessLog = "access.log"
+  ,_bsNetCDF = ""
   }
 
 instance FromJSON (BoMSolarConf -> BoMSolarConf) where
   parseJSON = withObject "BoMSolarConf" $ \o -> id
     <$< bsHttpPort  ..: "bsHttpPort"  % o
     <*< bsAccessLog ..: "bsAccessLog" % o
+    <*< bsNetCDF    ..: "bsNetCDF" % o
 
 instance ToJSON BoMSolarConf where
   toJSON a = object
     ["bsHttpPort"  A..= _bsHttpPort a
     ,"bsAccessLog" A..= _bsAccessLog a
+    ,"bsNetCDF"    A..= _bsNetCDF a
     ]
 
 pBoMSolarConf :: MParser BoMSolarConf
 pBoMSolarConf = id
   <$< bsHttpPort  .:: option auto % short 'P' <> long "http-port"  <> metavar "PORT" <> help "HTTP Port for webservice"
   <*< bsAccessLog .:: strOption   % short 'a' <> long "access-log" <> metavar "HTTPACCESS" <> help "HTTP Access log file"
+  <*< bsNetCDF    .:: strOption   % short 'n' <> long "netcdf-file" <> metavar "FILE.nc" <> help "NetCDF file matching format in README"
 
 
 --
