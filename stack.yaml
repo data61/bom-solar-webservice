@@ -23,8 +23,12 @@ extra-package-dbs: []
 # system-ghc: true
 
 # Require a specific version of stack, using version ranges
+# make sure we don't hit the .ssh deletion bug...
 # require-stack-version: -any # Default
-# require-stack-version: >= 1.0.0
+
+require-stack-version: ">= 1.0.4.3"
+
+local-bin-path: dist
 
 # Override the architecture used by stack, especially useful on Windows
 # arch: i386
