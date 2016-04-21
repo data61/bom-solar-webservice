@@ -6,10 +6,10 @@ homepage:            https://github.com/Axman6/bom-solar-webservice#readme
 license:             BSD3
 license-file:        LICENSE
 author:              Alex Mason
-maintainer:          axman6@gmail.com
-copyright:           2016 Author name here
+maintainer:          alex.mason@data61.csiro.au
+copyright:           2016 National ICT Australia (NICTA)
 category:            Web
-build-type:          Simple
+build-type:          Custom
 -- extra-source-files:
 cabal-version:       >=1.10
 
@@ -22,7 +22,7 @@ library
 executable bom-solar-webservice
   hs-source-dirs:      app
   main-is:             Main.hs
-  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N -O2
   build-depends:       base
                      , bom-solar-webservice
                      , servant
@@ -45,6 +45,7 @@ executable bom-solar-webservice
                      , async
                      , lens
                      , unordered-containers
+                     , configuration-tools >= 0.2.14 && < 0.3
   default-language:    Haskell2010
 
 test-suite bom-solar-webservice-test
