@@ -21,8 +21,20 @@ import Foreign.C.Types (CShort, CDouble, CInt)
 import Servant.API
 import Servant
 import Servant.CSV.Cassava
+
+import           Network.Wai                               (Middleware)
 import Network.Wai.Handler.Warp (run)
 import Network.Wai.Middleware.Cors (simpleCors)
+import           Network.Wai.Middleware.RequestLogger      (Destination (..),
+                                                            IPAddrSource (..),
+                                                            OutputFormat (..), RequestLoggerSettings (..),
+                                                            mkRequestLogger)
+import Data.Default
+
+import           System.IO                                 (BufferMode (..),
+                                                            IOMode (..),
+                                                            hSetBuffering,
+                                                            openFile)
 
 import Servant.Swagger
 import Data.Swagger
@@ -45,7 +57,8 @@ import Data.Time.Clock
 import Data.Time.Format
 import Data.Time.Calendar
 
-import Data.NetCDF
+import Data.NetCDF (ncVar, NcInfo, NcRead, NcVar)
+import qualified Data.NetCDF as NC
 import Data.NetCDF.Vector ()
 import qualified Data.Vector.Storable as SV
 import           Data.Vector.Storable (Vector)
@@ -90,16 +103,9 @@ pBoMSolarConf = id
   <*< bsAccessLog .:: strOption   % short 'a' <> long "access-log" <> metavar "HTTPACCESS" <> help "HTTP Access log file"
 
 
-nlats,nlons,nhours :: Int
-nlats = 679
-nlons = 839
-nhours = 227928
-
-firstHour :: UTCTime
-firstHour = UTCTime (fromGregorian 1989 12 31) (secondsToDiffTime 0)
-
-hour :: NominalDiffTime
-hour = 60*60 -- Seconds
+--
+-- HTTP Routes
+--
 
 type AppAPI
   = "swagger.json" :> Get '[JSON] Swagger
@@ -118,50 +124,96 @@ type BomAPIv1
   = "DNI"
       :> Capture "lat" Double :> Capture "lon" Double
       :> QueryParam "start" ISO8601 :> QueryParam "end" ISO8601
-      :> Get '[(CSV',DefaultEncodeOpts), JSON] [DNIVal]
+      :> Get '[(CSV',DefaultEncodeOpts), JSON] [TimedVal]
 
+
+main :: IO ()
+main = runWithPkgInfoConfiguration mainInfo pkgInfo $ \config -> do
+  enc <- liftIO $ NC.openFile (config ^. bsNetCDF)
+  case enc of
+    Left err -> fail $ show err
+    Right nc -> do
+      case (,,) <$> ncVar nc "Band1" <*> ncVar nc "lat" <*> ncVar nc  "lon" of
+        Nothing -> fail $ "variable not found in NetCDF file" ++ config ^. bsNetCDF
+        Just (band1,latsv,lonsv) -> do
+          Right lats <- NC.get nc latsv
+          Right lons <- NC.get nc lonsv
+          ch <- newChan
+          middleware <- makeMiddleware config
+          -- print =<< (runEitherT $ retriveTimeSeries nc band1 (cdToD lats) (cdToD lons)  (-27) 137 Nothing Nothing)
+          forkIO $ run (config ^. bsHttpPort) $ middleware $ serve appProxy (pure appSwagger :<|> retriveTimeSeries ch)
+          vectorServer nc band1 (cdToD lats) (cdToD lons) ch
+
+  where cdToD :: Vector CDouble -> Vector Double
+        cdToD = coerce
+
+mainInfo :: ProgramInfo BoMSolarConf
+mainInfo = programInfo "BoM Solar Webservice" pBoMSolarConf defaultBoMSolarConf
 
 appSwagger :: Swagger
 appSwagger = toSwagger bomProxy
   & S.info.infoTitle .~ "BoM Solar"
-  & S.info.infoVersion .~ "0.1"
+  & S.info.infoVersion .~ versionString
   & S.info.infoDescription ?~ "A service for retrieving Solar DNI information for a given \
                             \location from satellite data between 1990 and 2016"
 
+
+makeMiddleware :: BoMSolarConf -> IO Middleware
+makeMiddleware conf = do
+  h <- openFile (conf ^. bsAccessLog) AppendMode
+  hSetBuffering h NoBuffering
+  accessLogger <- mkRequestLogger def
+      {destination = Handle h
+      ,outputFormat = Apache FromFallback
+      ,autoFlush = True}
+  return $ accessLogger . simpleCors
+
+--
+-- Constants
+--
+nlats,nlons,nhours :: Int
+nlats = 679
+nlons = 839
+nhours = 227928
+
+firstHour :: UTCTime
+firstHour = UTCTime (fromGregorian 1989 12 31) (secondsToDiffTime 0)
+
+hour :: NominalDiffTime
+hour = 60*60 -- Seconds
+
+
+-- | A datatype representing a UTCTime shown and read using the ISO 8601 format with HH:MM:SS and timezone
+newtype ISO8601 = ISO8601 UTCTime deriving (Eq, Generic, ToJSON, FromJSON)
 iso8601Format = iso8601DateFormat $ Just "%H:%M:%S%z"
-newtype ISO8601 = ISO8601 UTCTime
-  deriving (Show, Eq, Generic, ToJSON, FromJSON)
-instance ToField ISO8601 where
-  toField (ISO8601 utc) = toField $ formatTime defaultTimeLocale iso8601Format utc
-instance FromText ISO8601 where
-  fromText t = ISO8601 <$> parseTimeM False defaultTimeLocale iso8601Format (unpack t)
+instance Show          ISO8601 where show (ISO8601 t) = formatTime defaultTimeLocale iso8601Format t
+instance Read          ISO8601 where readsPrec p = (coerce :: ReadS UTCTime -> ReadS ISO8601) $ readSTime True defaultTimeLocale iso8601Format
+instance ToField       ISO8601 where toField (ISO8601 utc) = toField $ formatTime defaultTimeLocale iso8601Format utc
+instance FromText      ISO8601 where fromText t = ISO8601 <$> parseTimeM False defaultTimeLocale iso8601Format (unpack t)
 instance ToParamSchema ISO8601 where
   toParamSchema _ = mempty
     & schemaType .~ SwaggerString
     & schemaFormat .~ Just (pack iso8601Format)
 
 
-newtype PosInt = PosInt Int
-  deriving (Eq, Show, Generic, ToJSON, FromJSON)
+newtype PosInt = PosInt Int deriving (Eq, Show, Generic, ToJSON, FromJSON)
 instance ToField PosInt where
   toField (PosInt i) = if i < 0
     then toField ("-" :: String)
     else toField i
 
-data DNIVal = DNIVal
-  {dniTime :: {-# UNPACK #-}!ISO8601
-  , dniVal :: {-# UNPACK #-}!PosInt
-  }
-  deriving (Eq,Show,Generic)
+data TimedVal = TimedVal
+  {tvTime :: {-# UNPACK #-}!ISO8601
+  , tvVal :: {-# UNPACK #-}!PosInt
+  } deriving (Eq,Show,Generic)
 
-instance ToJSON DNIVal
-instance FromJSON DNIVal
-instance DefaultOrdered DNIVal where
-  headerOrder _ = ["UTC time","DNI"]
-instance ToNamedRecord DNIVal where
-  toNamedRecord (DNIVal time val) = namedRecord
+instance ToJSON         TimedVal
+instance FromJSON       TimedVal
+instance DefaultOrdered TimedVal where headerOrder _ = ["UTC time","Value"]
+instance ToNamedRecord  TimedVal where
+  toNamedRecord (       TimedVal time val) = namedRecord
     [ "UTC time" Csv..= time
-    , "DNI"      Csv..= val
+    , "Value"    Csv..= val
     ]
 instance ToSchema PosInt -- where
 --   declareNamedSchema _ = pure (Just "PosInt", schema) where
@@ -170,9 +222,9 @@ instance ToSchema PosInt -- where
 --       & schemaMaxProperties ?~ 1200
     -- & schemaEnum ?~ ["-",Number 0, Number 1200]
 instance ToSchema ISO8601
-instance ToSchema DNIVal
+instance ToSchema TimedVal
 -- where
---   declareNamedSchema _ = pure (Just "DNIVal", schema) where
+--   declareNamedSchema _ = pure (Just "TimedVal", schema) where
 --     schema = mempty
 --       & schemaType .~ SwaggerObject
 --       & schemaProperties .~
@@ -182,12 +234,13 @@ instance ToSchema DNIVal
 --       & schemaRequired .~ ["dniTime", "dniVal"]
 
 
-
-retriveTimeSeries
-  :: Chan VecReq
-  -> Double -> Double --
-  -> Maybe ISO8601 -> Maybe ISO8601
-  -> EitherT ServantErr IO [DNIVal]
+-- | Handler for producing Solar data
+retriveTimeSeries :: Chan VecReq -- ^ Channel to send requests for vectors
+                  -> Double -- ^ Latitude
+                  -> Double -- ^ Longitude
+                  -> Maybe ISO8601 -- ^ Start time
+                  -> Maybe ISO8601 -- ^ End time
+                  -> EitherT ServantErr IO [TimedVal]
 retriveTimeSeries ch lat lon mstart mend = do
   evec <- liftIO $ do
     ret <- newEmptyMVar
@@ -199,39 +252,17 @@ retriveTimeSeries ch lat lon mstart mend = do
     Left (RangeErr mstart mend) -> left err400{errReasonPhrase = "Start time is before end time ("++show mstart++","++show mend++")"}
     Left TimedOut               -> left err500{errReasonPhrase = "Request timed out"}
     Right vec -> pure $
-      zipWith (coerce DNIVal)
+      zipWith (coerce TimedVal)
               (iterate (addUTCTime hour) $ fromMaybe firstHour (coerce mstart))
               (map (fromIntegral :: CInt -> Int) $ SV.toList vec)
 
-mainInfo :: ProgramInfo BoMSolarConf
-mainInfo = programInfo "BoM Solar Webservice" pBoMSolarConf defaultBoMSolarConf
-
-main :: IO ()
-main = runWithPkgInfoConfiguration mainInfo pkgInfo $ \config -> do
-  enc <- liftIO $ openFile "all-DNI-reformat.nc"
-  case enc of
-    Left err -> fail $ show err
-    Right nc -> do
-      case (,,) <$> ncVar nc "Band1" <*> ncVar nc "lat" <*> ncVar nc  "lon" of
-        Nothing -> fail "Band1 variable not found in NetCDF file"
-        Just (band1,latsv,lonsv) -> do
-          Right lats <- get nc latsv
-          Right lons <- get nc lonsv
-          ch <- newChan
-
-          -- print =<< (runEitherT $ retriveTimeSeries nc band1 (cdToD lats) (cdToD lons)  (-27) 137 Nothing Nothing)
-          forkIO $ run (config ^. bsHttpPort) $ simpleCors $ serve appProxy (pure appSwagger :<|> retriveTimeSeries ch)
-          vectorServer nc band1 (cdToD lats) (cdToD lons) ch
-
-  where cdToD :: Vector CDouble -> Vector Double
-        cdToD = coerce
 
 data VecReq = VecReq
-  {vrLat   :: !Double
-  ,vrLon   :: !Double
-  ,vrStart :: !(Maybe ISO8601)
-  ,vrEnd   :: !(Maybe ISO8601)
-  ,vrRet   :: !(MVar (Either VecReqErr (Vector CInt)))
+  {vrLat   :: !Double          -- ^ Latitude
+  ,vrLon   :: !Double          -- ^ Longitude
+  ,vrStart :: !(Maybe ISO8601) -- ^ Start time
+  ,vrEnd   :: !(Maybe ISO8601) -- ^ End time
+  ,vrRet   :: !(MVar (Either VecReqErr (Vector CInt))) -- ^ Return variable, with Either an error or the vector
   }
 
 data VecReqErr
@@ -240,9 +271,19 @@ data VecReqErr
   | StrErr String
   | TimedOut
 
-vectorServer :: NcInfo NcRead -> NcVar -> Vector Double -> Vector Double
-  -> Chan VecReq
-  -> IO ()
+-- | A server function which responds to reauests for data
+-- for specific a latitude and longitude, and optional start and
+-- end times.
+--
+-- Normally this would be handled directly in the handler, but
+-- NetCDF is awful and fails to read the NetCDF files unless called from
+-- the `main' thread.
+vectorServer :: NcInfo NcRead -- ^ NetCDF File info
+             -> NcVar         -- ^ Variable from NetCDF File to read
+             -> Vector Double -- ^ Vector of latitudes
+             -> Vector Double -- ^ Vector of longitudes
+             -> Chan VecReq   -- ^ Channel to await requests on
+             -> IO ()
 vectorServer nc band1 lats lons ch = forever $ do
   (VecReq lat lon mstart mend ret) <- readChan ch
   let lati = vectorIndex LT FromStart lats lat
@@ -252,7 +293,7 @@ vectorServer nc band1 lats lons ch = forever $ do
   if | eidx < sidx -> putMVar ret (Left $ RangeErr mstart mend)
      | lati == -1 || loni == -1 -> putMVar ret (Left $ NotFound lat lon)
      | otherwise -> do
-        evec <- getA nc band1 [lati,loni,sidx] [1,1,eidx-sidx]
+        evec <- NC.getA nc band1 [lati,loni,sidx] [1,1,eidx-sidx]
         putMVar ret $ case evec of
           Left err -> Left (StrErr $ show err)
           Right vec -> if SV.all (== -999) vec then Left (NotFound lat lon) else Right vec
@@ -269,6 +310,7 @@ vectorServer nc band1 lats lons ch = forever $ do
 
 
 data IndexStart = FromStart | FromEnd
+
 vectorIndex :: (SV.Storable a, Ord a)
             => Ordering -> IndexStart -> SV.Vector a -> a -> Int
 vectorIndex o s v val = case (go o, s) of
