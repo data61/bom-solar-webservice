@@ -19,7 +19,7 @@ import Data.Text (unpack, pack)
 import Foreign.C.Types (CShort, CDouble, CInt)
 
 import Servant.API
-import Servant
+import Servant as S
 import Servant.CSV.Cassava
 
 import           Network.Wai                               (Middleware)
@@ -73,6 +73,8 @@ import Control.Concurrent.MVar
 
 import           Configuration.Utils
 import           PkgInfo_bom_solar_webservice
+
+import Text.Printf (printf)
 
 --
 -- Configuration types
@@ -132,7 +134,7 @@ type BomAPIv1
   = "DNI"
       :> Capture "lat" Double :> Capture "lon" Double
       :> QueryParam "start" ISO8601 :> QueryParam "end" ISO8601
-      :> Get '[(CSV',DefaultEncodeOpts), JSON] [TimedVal]
+      :> Get '[(CSV',DefaultEncodeOpts), JSON] (Headers '[S.Header "Content-Disposition" String] [TimedVal])
 
 
 main :: IO ()
@@ -248,7 +250,7 @@ retriveTimeSeries :: Chan VecReq -- ^ Channel to send requests for vectors
                   -> Double -- ^ Longitude
                   -> Maybe ISO8601 -- ^ Start time
                   -> Maybe ISO8601 -- ^ End time
-                  -> EitherT ServantErr IO [TimedVal]
+                  -> EitherT ServantErr IO (Headers '[S.Header "Content-Disposition" String] [TimedVal])
 retriveTimeSeries ch lat lon mstart mend = do
   evec <- liftIO $ do
     ret <- newEmptyMVar
@@ -259,7 +261,10 @@ retriveTimeSeries ch lat lon mstart mend = do
     Left (NotFound lat lon)     -> left err404{errReasonPhrase = "Lat or Lon out of bounds ("++show lat++","++show lon++")"}
     Left (RangeErr mstart mend) -> left err400{errReasonPhrase = "Start time is before end time ("++show mstart++","++show mend++")"}
     Left TimedOut               -> left err500{errReasonPhrase = "Request timed out"}
-    Right vec -> pure $
+    Right vec ->
+      pure $
+      -- TODO Change to DNI/DHI if we ever support both
+      addHeader (printf "filename=dni_%.5f_%.5f.csv" lat lon) $
       zipWith (coerce TimedVal)
               (iterate (addUTCTime hour) $ fromMaybe firstHour (coerce mstart))
               (map (fromIntegral :: CInt -> Int) $ SV.toList vec)
