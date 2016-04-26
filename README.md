@@ -1,5 +1,5 @@
 # bom-solar-webservice
-Runs on port 8080, and needs the file `all-DNI-reformat.nc` in the same directory.
+Runs on port 3003 by default, and needs the file `all-DNI-reformat.nc` in the same directory. See `--help` for details of configutation (`stack exec bom-solar-processor -- --help`)
 
 API is currently `:8080/v1/DNI/<lat>/<lon>`
 
