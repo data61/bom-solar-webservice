@@ -7,6 +7,7 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE QuasiQuotes #-}
 
 
 module Main where
@@ -75,6 +76,7 @@ import           Configuration.Utils
 import           PkgInfo_bom_solar_webservice
 
 import Text.Printf (printf)
+import Text.Heredoc (there)
 
 --
 -- Configuration types
@@ -164,8 +166,11 @@ appSwagger :: Swagger
 appSwagger = toSwagger bomProxy
   & S.info.infoTitle .~ "BoM Solar"
   & S.info.infoVersion .~ versionString
-  & S.info.infoDescription ?~ "A service for retrieving Solar DNI information for a given \
-                            \location from satellite data between 1990 and 2016"
+  -- & S.info.infoContact ?~ Contact Nothing Nothing Nothing
+  & S.info.infoContact.non (Contact Nothing Nothing Nothing).contactName ?~ "Alex Mason"
+  & S.info.infoContact._Just.contactEmail ?~ "aremi@nicta.com.au"
+  & S.info.infoDescription ?~ [there|Description.md|]
+  & S.info.infoLicense ?~ License "Apache 2.0" (Just $ URL "http://www.apache.org/licenses/LICENSE-2.0")
 
 
 makeMiddleware :: BoMSolarConf -> IO Middleware
