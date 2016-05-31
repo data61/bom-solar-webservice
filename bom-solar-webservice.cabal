@@ -1,9 +1,9 @@
 name:                bom-solar-webservice
-version:             0.1.0.2
+version:             0.1.0.3
 synopsis:            Initial project template from stack
 description:         Please see README.md
 homepage:            https://github.com/Axman6/bom-solar-webservice#readme
-license:             Apache2
+license:             Apache-2.0
 license-file:        LICENSE
 author:              Alex Mason
 maintainer:          alex.mason@data61.csiro.au
@@ -12,6 +12,7 @@ category:            Web
 build-type:          Custom
 -- extra-source-files:
 cabal-version:       >=1.22
+extra-source-files:  Description.md
 
 library
   hs-source-dirs:      src
