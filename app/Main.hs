@@ -22,6 +22,7 @@ import Foreign.C.Types (CShort, CDouble, CInt)
 import Servant.API
 import Servant as S
 import Servant.CSV.Cassava
+import Web.HttpApiData
 
 import           Network.Wai                               (Middleware)
 import Network.Wai.Handler.Warp (run)
@@ -120,8 +121,10 @@ pBoMSolarConf = id
 --
 
 type AppAPI
-  = "swagger.json" :> Get '[JSON] Swagger
-    :<|> BoMAPI
+  = "solar-satellite" :>
+      ("swagger.json" :> S.Header "Host" String :> Get '[JSON] Swagger
+      :<|> BoMAPI
+      )
 
 appProxy :: Proxy AppAPI
 appProxy = Proxy
@@ -129,7 +132,7 @@ appProxy = Proxy
 type BoMAPI
   = "v1" :> BomAPIv1
 
-bomProxy :: Proxy BoMAPI
+bomProxy :: Proxy ("solar-satellite" :> BoMAPI)
 bomProxy = Proxy
 
 type BomAPIv1
@@ -153,7 +156,10 @@ main = runWithPkgInfoConfiguration mainInfo pkgInfo $ \config -> do
           ch <- newChan
           middleware <- makeMiddleware config
           -- print =<< (runEitherT $ retriveTimeSeries nc band1 (cdToD lats) (cdToD lons)  (-27) 137 Nothing Nothing)
-          forkIO $ run (config ^. bsHttpPort) $ middleware $ serve appProxy (pure appSwagger :<|> retriveTimeSeries ch)
+          forkIO
+            . run (config ^. bsHttpPort)
+            . middleware
+            $ serve appProxy ((pure . appSwagger) :<|> retriveTimeSeries ch)
           vectorServer nc band1 (cdToD lats) (cdToD lons) ch
 
   where cdToD :: Vector CDouble -> Vector Double
@@ -162,15 +168,16 @@ main = runWithPkgInfoConfiguration mainInfo pkgInfo $ \config -> do
 mainInfo :: ProgramInfo BoMSolarConf
 mainInfo = programInfo "BoM Solar Webservice" pBoMSolarConf defaultBoMSolarConf
 
-appSwagger :: Swagger
-appSwagger = toSwagger bomProxy
-  & S.info.infoTitle .~ "BoM Solar"
-  & S.info.infoVersion .~ versionString
+appSwagger :: Maybe String -> Swagger
+appSwagger mhost = toSwagger bomProxy
+  & S.info.title .~ "BoM Solar"
+  & S.info.version .~ versionString
   -- & S.info.infoContact ?~ Contact Nothing Nothing Nothing
-  & S.info.infoContact.non (Contact Nothing Nothing Nothing).contactName ?~ "Alex Mason"
-  & S.info.infoContact._Just.contactEmail ?~ "aremi@nicta.com.au"
-  & S.info.infoDescription ?~ [there|Description.md|]
-  & S.info.infoLicense ?~ License "Apache 2.0" (Just $ URL "http://www.apache.org/licenses/LICENSE-2.0")
+  & S.info.contact.non (Contact Nothing Nothing Nothing).S.name ?~ "Alex Mason"
+  & S.info.contact._Just.email ?~ "aremi@nicta.com.au"
+  & S.info.description ?~ [there|Description.md|]
+  & S.info.S.license ?~ License "Apache 2.0" (Just $ URL "http://www.apache.org/licenses/LICENSE-2.0")
+  & host ?~ Host (maybe "services.aremi.nicta.com.au" id mhost) Nothing
 
 
 makeMiddleware :: BoMSolarConf -> IO Middleware
@@ -201,14 +208,14 @@ hour = 60*60 -- Seconds
 -- | A datatype representing a UTCTime shown and read using the ISO 8601 format with HH:MM:SS and timezone
 newtype ISO8601 = ISO8601 UTCTime deriving (Eq, Generic, ToJSON, FromJSON)
 iso8601Format = iso8601DateFormat $ Just "%H:%M:%S%z"
-instance Show          ISO8601 where show (ISO8601 t) = formatTime defaultTimeLocale iso8601Format t
-instance Read          ISO8601 where readsPrec p = (coerce :: ReadS UTCTime -> ReadS ISO8601) $ readSTime True defaultTimeLocale iso8601Format
-instance ToField       ISO8601 where toField (ISO8601 utc) = toField $ formatTime defaultTimeLocale iso8601Format utc
-instance FromText      ISO8601 where fromText t = ISO8601 <$> parseTimeM False defaultTimeLocale iso8601Format (unpack t)
-instance ToParamSchema ISO8601 where
+instance Show            ISO8601 where show (ISO8601 t) = formatTime defaultTimeLocale iso8601Format t
+instance Read            ISO8601 where readsPrec p = (coerce :: ReadS UTCTime -> ReadS ISO8601) $ readSTime True defaultTimeLocale iso8601Format
+instance ToField         ISO8601 where toField (ISO8601 utc) = toField $ formatTime defaultTimeLocale iso8601Format utc
+instance FromHttpApiData ISO8601 where parseQueryParam t = ISO8601 <$> parseTimeM False defaultTimeLocale iso8601Format (unpack t)
+instance ToParamSchema   ISO8601 where
   toParamSchema _ = mempty
-    & schemaType .~ SwaggerString
-    & schemaFormat .~ Just (pack iso8601Format)
+    & type_ .~ SwaggerString
+    & format .~ Just (pack iso8601Format)
 
 
 newtype PosInt = PosInt Int deriving (Eq, Show, Generic, ToJSON, FromJSON)
@@ -230,12 +237,12 @@ instance ToNamedRecord  TimedVal where
     [ "UTC time" Csv..= time
     , "Value"    Csv..= val
     ]
-instance ToSchema PosInt -- where
---   declareNamedSchema _ = pure (Just "PosInt", schema) where
---     schema = toSchema (Proxy :: Proxy Int)
---       & schemaMinProperties ?~ 0
---       & schemaMaxProperties ?~ 1200
-    -- & schemaEnum ?~ ["-",Number 0, Number 1200]
+instance ToSchema PosInt where
+  declareNamedSchema _ = pure (NamedSchema (Just "PosInt") schema) where
+    schema = mempty
+      & minProperties ?~ 0
+      & maxProperties ?~ 1200
+      & enum_ ?~ ["-",Number 0, Number 1200]
 instance ToSchema ISO8601
 instance ToSchema TimedVal
 -- where
@@ -255,17 +262,17 @@ retriveTimeSeries :: Chan VecReq -- ^ Channel to send requests for vectors
                   -> Double -- ^ Longitude
                   -> Maybe ISO8601 -- ^ Start time
                   -> Maybe ISO8601 -- ^ End time
-                  -> EitherT ServantErr IO (Headers '[S.Header "Content-Disposition" String] [TimedVal])
+                  -> Handler (Headers '[S.Header "Content-Disposition" String] [TimedVal])
 retriveTimeSeries ch lat lon mstart mend = do
   evec <- liftIO $ do
     ret <- newEmptyMVar
     writeChan ch (VecReq lat lon mstart mend ret)
     race (threadDelay 200000 >> return TimedOut) (takeMVar ret)
   case join evec of
-    Left (StrErr err)           -> left err500{errReasonPhrase = errReasonPhrase err500 ++ " ("++err++")"}
-    Left (NotFound lat lon)     -> left err404{errReasonPhrase = "Lat or Lon out of bounds ("++show lat++","++show lon++")"}
-    Left (RangeErr mstart mend) -> left err400{errReasonPhrase = "Start time is before end time ("++show mstart++","++show mend++")"}
-    Left TimedOut               -> left err500{errReasonPhrase = "Request timed out"}
+    Left (StrErr err)           -> throwError err500{errReasonPhrase = errReasonPhrase err500 ++ " ("++err++")"}
+    Left (NotFound lat lon)     -> throwError err404{errReasonPhrase = "Lat or Lon out of bounds ("++show lat++","++show lon++")"}
+    Left (RangeErr mstart mend) -> throwError err400{errReasonPhrase = "Start time is before end time ("++show mstart++","++show mend++")"}
+    Left TimedOut               -> throwError err500{errReasonPhrase = "Request timed out"}
     Right vec ->
       pure $
       -- TODO Change to DNI/DHI if we ever support both

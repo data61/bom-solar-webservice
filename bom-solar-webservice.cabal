@@ -1,5 +1,5 @@
 name:                bom-solar-webservice
-version:             0.1.0.3
+version:             0.2.0.0
 synopsis:            Initial project template from stack
 description:         Please see README.md
 homepage:            https://github.com/Axman6/bom-solar-webservice#readme
@@ -29,6 +29,7 @@ executable bom-solar-webservice
                      , bom-solar-webservice
                      , servant
                      , servant-server
+                     , http-api-data
                      , warp
                      , wai
                      , wai-cors
