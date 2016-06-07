@@ -79,6 +79,7 @@ import           Configuration.Utils
 import           PkgInfo_bom_solar_webservice
 
 import Text.Printf (printf)
+import System.IO (hSetBuffering, stdout, BufferMode(NoBuffering))
 import Text.Heredoc (there)
 
 --
@@ -146,6 +147,7 @@ type BomAPIv1
 
 main :: IO ()
 main = runWithPkgInfoConfiguration mainInfo pkgInfo $ \config -> do
+  hSetBuffering stdout NoBuffering
   enc <- liftIO $ NC.openFile (config ^. bsNetCDF)
   case enc of
     Left err -> fail $ show err

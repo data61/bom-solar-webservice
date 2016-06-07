@@ -1,3 +1,6 @@
+## 0.2.0.2
+- Fix buffering on stdout
+
 ## 0.2.0.1
 - Add printing of stats for requests
 - convert to using Vector to hopefully make things faster
