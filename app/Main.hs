@@ -62,6 +62,8 @@ import Data.Time.Calendar
 import Data.NetCDF (ncVar, NcInfo, NcRead, NcVar)
 import qualified Data.NetCDF as NC
 import Data.NetCDF.Vector ()
+import qualified Data.Vector as V
+import qualified Data.Vector.Generic as G
 import qualified Data.Vector.Storable as SV
 import           Data.Vector.Storable (Vector)
 
@@ -139,7 +141,7 @@ type BomAPIv1
   = "DNI"
       :> Capture "lat" Double :> Capture "lon" Double
       :> QueryParam "start" ISO8601 :> QueryParam "end" ISO8601
-      :> Get '[(CSV',DefaultEncodeOpts), JSON] (Headers '[S.Header "Content-Disposition" String] [TimedVal])
+      :> Get '[(CSV',DefaultEncodeOpts), JSON] (Headers '[S.Header "Content-Disposition" String] (V.Vector TimedVal))
 
 
 main :: IO ()
@@ -262,12 +264,16 @@ retriveTimeSeries :: Chan VecReq -- ^ Channel to send requests for vectors
                   -> Double -- ^ Longitude
                   -> Maybe ISO8601 -- ^ Start time
                   -> Maybe ISO8601 -- ^ End time
-                  -> Handler (Headers '[S.Header "Content-Disposition" String] [TimedVal])
+                  -> Handler (Headers '[S.Header "Content-Disposition" String] (V.Vector TimedVal))
 retriveTimeSeries ch lat lon mstart mend = do
   evec <- liftIO $ do
+    start <- getCurrentTime
     ret <- newEmptyMVar
     writeChan ch (VecReq lat lon mstart mend ret)
-    race (threadDelay 200000 >> return TimedOut) (takeMVar ret)
+    evec <- race (threadDelay (60*1000000) >> return TimedOut) (takeMVar ret)
+    end <- getCurrentTime
+    printf "%s - %s (%fs) for lat/lon %f %f\n" (fmtTime start) (fmtTime end) (fromRational $ toRational $ diffUTCTime end start :: Double) lat lon
+    pure evec
   case join evec of
     Left (StrErr err)           -> throwError err500{errReasonPhrase = errReasonPhrase err500 ++ " ("++err++")"}
     Left (NotFound lat lon)     -> throwError err404{errReasonPhrase = "Lat or Lon out of bounds ("++show lat++","++show lon++")"}
@@ -277,9 +283,11 @@ retriveTimeSeries ch lat lon mstart mend = do
       pure $
       -- TODO Change to DNI/DHI if we ever support both
       addHeader (printf "filename=dni_%.5f_%.5f.csv" lat lon) $
-      zipWith (coerce TimedVal)
-              (iterate (addUTCTime hour) $ fromMaybe firstHour (coerce mstart))
-              (map (fromIntegral :: CInt -> Int) $ SV.toList vec)
+      V.zipWith (coerce TimedVal)
+              (V.iterateN (SV.length vec) (addUTCTime hour) $ fromMaybe firstHour (coerce mstart))
+              -- (SV.map (fromIntegral :: CInt -> Int) $ vec)
+              (G.convert $ SV.map (fromIntegral :: CInt -> Int) $ vec)
+    where fmtTime = formatTime defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%Z"))
 
 
 data VecReq = VecReq
