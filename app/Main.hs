@@ -1,94 +1,95 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE OverloadedLists #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE MultiWayIf                 #-}
+{-# LANGUAGE OverloadedLists            #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE QuasiQuotes                #-}
+{-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TypeOperators              #-}
 
 
 module Main where
 
-import Lib
+import           Control.Applicative
 
-import Control.Applicative
+import           Data.Text                            (pack, unpack)
+import           Foreign.C.Types                      (CDouble, CInt, CShort)
 
-import Data.Text (unpack, pack)
-import Foreign.C.Types (CShort, CDouble, CInt)
+import           Servant                              as S
+import           Servant.API
+import           Servant.CSV.Cassava
+import           Web.HttpApiData
 
-import Servant.API
-import Servant as S
-import Servant.CSV.Cassava
-import Web.HttpApiData
+import           Data.Default
+import           Network.Wai                          (Middleware)
+import           Network.Wai.Handler.Warp             (run)
+import           Network.Wai.Middleware.Cors          (simpleCors)
+import           Network.Wai.Middleware.Gzip          (gzip)
+import           Network.Wai.Middleware.RequestLogger (Destination (..),
+                                                       IPAddrSource (..),
+                                                       OutputFormat (..),
+                                                       RequestLoggerSettings (..),
+                                                       mkRequestLogger)
 
-import           Network.Wai                               (Middleware)
-import Network.Wai.Handler.Warp (run)
-import Network.Wai.Middleware.Cors (simpleCors)
-import           Network.Wai.Middleware.RequestLogger      (Destination (..),
-                                                            IPAddrSource (..),
-                                                            OutputFormat (..), RequestLoggerSettings (..),
-                                                            mkRequestLogger)
-import Data.Default
+import           System.IO                            (BufferMode (..),
+                                                       IOMode (..),
+                                                       hSetBuffering, openFile)
 
-import           System.IO                                 (BufferMode (..),
-                                                            IOMode (..),
-                                                            hSetBuffering,
-                                                            openFile)
+import           Control.Lens                         hiding ((.=))
+import           Data.HashMap.Strict                  ()
+import           Data.Swagger
+import           Data.Swagger.Lens                    as S
+import           Data.Swagger.ParamSchema
+import           Servant.Swagger
 
-import Servant.Swagger
-import Data.Swagger
-import Data.Swagger.ParamSchema
-import Data.Swagger.Lens as S
-import Control.Lens hiding ((.=))
-import Data.HashMap.Strict ()
+import           Control.Monad
+import           Control.Monad.IO.Class
+import           Control.Monad.Trans
+import           Control.Monad.Trans.Either
 
-import Control.Monad
-import Control.Monad.Trans
-import Control.Monad.Trans.Either
-import Control.Monad.IO.Class
+import           Data.Aeson                           hiding ((.=))
+import qualified Data.Aeson                           as A
+import           Data.Csv                             as Csv
+import           Data.Maybe                           (fromJust, fromMaybe)
 
-import Data.Aeson hiding ((.=))
-import qualified Data.Aeson as A
-import Data.Csv as Csv
-import Data.Maybe (fromJust, fromMaybe)
+import           Data.Time.Calendar
+import           Data.Time.Clock
+import           Data.Time.Format
 
-import Data.Time.Clock
-import Data.Time.Format
-import Data.Time.Calendar
+import           Data.NetCDF                          (NcInfo, NcRead, NcVar,
+                                                       ncVar)
+import qualified Data.NetCDF                          as NC
+import           Data.NetCDF.Vector                   ()
+import qualified Data.Vector                          as V
+import qualified Data.Vector.Generic                  as G
+import           Data.Vector.Storable                 (Vector)
+import qualified Data.Vector.Storable                 as SV
 
-import Data.NetCDF (ncVar, NcInfo, NcRead, NcVar)
-import qualified Data.NetCDF as NC
-import Data.NetCDF.Vector ()
-import qualified Data.Vector as V
-import qualified Data.Vector.Generic as G
-import qualified Data.Vector.Storable as SV
-import           Data.Vector.Storable (Vector)
+import           Data.Coerce
+import           GHC.Generics
 
-import Data.Coerce
-import GHC.Generics
-
-import Control.Concurrent
-import Control.Concurrent.Async
-import Control.Concurrent.Chan
-import Control.Concurrent.MVar
+import           Control.Concurrent
+import           Control.Concurrent.Async
+import           Control.Concurrent.Chan
+import           Control.Concurrent.MVar
 
 import           Configuration.Utils
 import           PkgInfo_bom_solar_webservice
 
-import Text.Printf (printf)
-import System.IO (hSetBuffering, stdout, BufferMode(NoBuffering))
-import Text.Heredoc (there)
+import           System.IO                            (BufferMode (NoBuffering),
+                                                       hSetBuffering, stdout)
+import           Text.Heredoc                         (there)
+import           Text.Printf                          (printf)
 
 --
 -- Configuration types
 --
 data BoMSolarConf = BoMSolarConf
-  {_bsHttpPort :: Int
+  {_bsHttpPort  :: Int
   ,_bsAccessLog :: FilePath
-  ,_bsNetCDF :: FilePath
+  ,_bsNetCDF    :: FilePath
   }
 $(makeLenses ''BoMSolarConf)
 
