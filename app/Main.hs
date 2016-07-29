@@ -169,7 +169,7 @@ main = runWithPkgInfoConfiguration mainInfo pkgInfo $ \config -> do
       -- TODO: We could probably report what error we're getting here
       -- more precisely
       case (,,) <$> ncVar nc "Band1" <*> ncVar nc "lat" <*> ncVar nc  "lon" of
-        Nothing -> fail $ "variable not found in NetCDF file" ++ config ^. bsNetCDF
+        Nothing -> fail $ "variable not found in NetCDF file " ++ config ^. bsNetCDF
         Just (band1,latsv,lonsv) -> do
           -- TODO: Hopefully these are guaranteed to be there if we get here
           -- because we've checked above if the variables exist, but they
@@ -184,10 +184,11 @@ main = runWithPkgInfoConfiguration mainInfo pkgInfo $ \config -> do
             . run (config ^. bsHttpPort)
             . middleware
             $ serve appProxy ((pure . appSwagger) :<|> retriveTimeSeries ch)
-          vectorServer nc band1 (cdToD lats) (cdToD lons) ch
 
-  where cdToD :: Vector CDouble -> Vector Double
-        cdToD = coerce
+          vectorServer nc band1 (cdvecToDvec lats) (cdvecToDvec lons) ch
+
+  where cdvecToDvec :: Vector CDouble -> Vector Double
+        cdvecToDvec = coerce
 
 mainInfo :: ProgramInfo BoMSolarConf
 mainInfo = programInfo "BoM Solar Webservice" pBoMSolarConf defaultBoMSolarConf
@@ -292,26 +293,35 @@ retriveTimeSeries :: Chan VecReq -- ^ Channel to send requests for vectors
 retriveTimeSeries ch lat lon mstart mend = do
   evec <- liftIO $ do
     start <- getCurrentTime
-    ret <- newEmptyMVar
+    ret   <- newEmptyMVar
     writeChan ch (VecReq lat lon mstart mend ret)
-    evec <- race (threadDelay (60*1000000) >> return TimedOut) (takeMVar ret)
-    end <- getCurrentTime
-    printf "%s - %s (%fs) for lat/lon %f %f\n" (fmtTime start) (fmtTime end) (fromRational $ toRational $ diffUTCTime end start :: Double) lat lon
+    evec  <- race (threadDelay (60*1000000) >> return TimedOut) (takeMVar ret)
+    end   <- getCurrentTime
+    -- TODO: We should probably do some proper logging here, but
+    -- this does what we need for now
+    printf "%s - %s (%fs) for lat/lon %f %f\n"
+           (fmtTime start) (fmtTime end)
+           (fromRational $ toRational $ diffUTCTime end start :: Double)
+           lat lon
     pure evec
   case join evec of
-    Left (StrErr err)           -> throwError err500{errReasonPhrase = errReasonPhrase err500 ++ " ("++err++")"}
-    Left (NotFound lat lon)     -> throwError err404{errReasonPhrase = "Lat or Lon out of bounds ("++show lat++","++show lon++")"}
-    Left (RangeErr mstart mend) -> throwError err400{errReasonPhrase = "Start time is before end time ("++show mstart++","++show mend++")"}
-    Left TimedOut               -> throwError err500{errReasonPhrase = "Request timed out"}
-    Right vec ->
-      pure $
-      -- TODO Change to DNI/DHI if we ever support both
-      addHeader (printf "filename=dni_%.5f_%.5f.csv" lat lon) $
+    Left (StrErr err)
+          -> throwError err500{errReasonPhrase = errReasonPhrase err500 ++ " ("++err++")"}
+    Left (NotFound lat lon)
+          -> throwError err404{errReasonPhrase = "Lat or Lon out of bounds ("++show lat++","++show lon++")"}
+    Left (RangeErr mstart mend)
+          -> throwError err400{errReasonPhrase = "Start time is before end time ("++show mstart++","++show mend++")"}
+    Left TimedOut
+          -> throwError err500{errReasonPhrase = "Request timed out"}
+    Right vec
+          -- TODO: Change to DNI/DHI if we ever support both
+          -> pure . addHeader (printf "filename=dni_%.5f_%.5f.csv" lat lon) $
+      -- Coerce from :: ISO8601 -> PosInt -> TimeVal to UTCTime -> Int -> TimeVal
       V.zipWith (coerce TimedVal)
-              (V.iterateN (SV.length vec) (addUTCTime hour) $ fromMaybe firstHour (coerce mstart))
+              (V.iterateN (SV.length vec) (addUTCTime hour) . fromMaybe firstHour $ coerce mstart)
               -- (SV.map (fromIntegral :: CInt -> Int) $ vec)
               (G.convert $ SV.map (fromIntegral :: CInt -> Int) $ vec)
-    where fmtTime = formatTime defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%Z"))
+    where fmtTime = formatTime defaultTimeLocale . iso8601DateFormat . Just $ "%H:%M:%S%Z"
 
 
 data VecReq = VecReq
