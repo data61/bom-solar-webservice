@@ -1,3 +1,6 @@
+## 0.2.0.3
+- Fix email address to point to data61 domain
+
 ## 0.2.0.2
 - Fix buffering on stdout
 
