@@ -26,7 +26,6 @@ import           Data.Default
 import           Network.Wai                          (Middleware)
 import           Network.Wai.Handler.Warp             (run)
 import           Network.Wai.Middleware.Cors          (simpleCors)
-import           Network.Wai.Middleware.Gzip          (gzip)
 import           Network.Wai.Middleware.RequestLogger (Destination (..),
                                                        IPAddrSource (..),
                                                        OutputFormat (..),
@@ -200,7 +199,7 @@ appSwagger mhost = toSwagger bomProxy
                                     -- by Serup.hs when cabal is compiling the package
   -- & S.info.infoContact ?~ Contact Nothing Nothing Nothing
   & S.info.contact.non (Contact Nothing Nothing Nothing).S.name ?~ "Alex Mason"
-  & S.info.contact._Just.email ?~ "aremi@nicta.com.au"
+  & S.info.contact._Just.email ?~ "aremi@data61.csiro.au"
   & S.info.description ?~ [there|Description.md|]
   & S.info.S.license ?~ License "Apache 2.0" (Just $ URL "http://www.apache.org/licenses/LICENSE-2.0")
   -- TODO: Should this be a configuration parameter?
